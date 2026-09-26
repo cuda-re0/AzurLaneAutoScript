@@ -1442,6 +1442,34 @@
     "DoMajorCommission": {
       "name": "Do Major Commissions",
       "help": "1200 oil commission is now outdated, the yield is very low, it is recommended to disable"
+    },
+    "AutoLevelShip": {
+      "name": "Auto pick a level 100+ ship for high-level commissions",
+      "help": "When the game sends Alas to the dock because the recommended fleet misses the level requirement, pick one free ship of level 100+ by hand and let the recommend button fill the rest of the slots."
+    },
+    "AutoPickShip": {
+      "name": "Commission ship pick fallback (by rarity/level)",
+      "help": "When ships are short, locked ships are picked automatically; when no ship is available, it follows the \"no free level 100+ ship\" setting."
+    },
+    "NoFreeShipPolicy": {
+      "name": "When no free level 100+ ship exists",
+      "help": "",
+      "skip": "Skip the commission",
+      "use_fleet": "Use ships in fleets"
+    },
+    "PickMinRarity": {
+      "name": "└ Pick fallback - lowest rarity to send",
+      "help": "Active only when \"Commission ship pick fallback\" is on.",
+      "common": "White (common) and above",
+      "rare": "Blue (rare) and above",
+      "elite": "Purple (elite) and above",
+      "super_rare": "Gold (super rare) and above"
+    },
+    "PickLevelOrder": {
+      "name": "└ Pick fallback - level order within a rarity",
+      "help": "Active only when \"Commission ship pick fallback\" is on.",
+      "low_first": "Lowest level first",
+      "high_first": "Highest level first"
     }
   },
   "Tactical": {

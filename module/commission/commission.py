@@ -13,10 +13,13 @@ from module.config.config_generated import GeneratedConfig
 from module.config.utils import get_server_last_update, get_server_next_update
 from module.dorm.dorm import RewardDorm
 from module.exception import GameStuckError, OilMaxed, RequestHumanTakeover
+from module.handler.assets import POPUP_CANCEL, POPUP_CONFIRM
 from module.handler.info_handler import InfoHandler
 from module.logger import logger
 from module.map.map_grids import SelectedGrids
-from module.retire.assets import DOCK_CHECK
+from module.retire.assets import DOCK_CHECK, SHIP_CONFIRM
+from module.retire.dock import CARD_GRIDS, DOCK_SCROLL, Dock, OCR_DOCK_SELECTED
+from module.retire.scanner import ShipScanner
 from module.ui.assets import BACK_ARROW, REWARD_GOTO_COMMISSION
 from module.ui.page import page_commission, page_reward
 from module.ui.scroll import Scroll
@@ -29,23 +32,21 @@ COMMISSION_SWITCH.add_state('daily', COMMISSION_DAILY)
 COMMISSION_SWITCH.add_state('urgent', COMMISSION_URGENT)
 COMMISSION_SCROLL = Scroll(COMMISSION_SCROLL_AREA, color=(247, 211, 66), name='COMMISSION_SCROLL')
 
-# Some commissions can not be started at all. The "High-level" ones require a
-# ship above a level, for example "High-level tactical research I" needs at
-# least one ship of level 100, while "Recommend" fills in whatever it finds,
-# level 1 ships included. The Start button then stays grey, clicking Recommend
-# again does not help, and the game sends you to the dock when a start is
-# confirmed. Alas loops on it and used to raise GameStuckError, which restarts
-# the whole game and throws away every running commission. It is far cheaper to
-# give up on that single commission, the caller then simply moves on to the
-# next one in the chosen list.
-# Three signals, whichever comes first:
+# Commissions that can not be started (e.g. level-capped) are given up after a
+# short wait rather than looping until GameStuckError restarts the game.
 COMMISSION_SKIP_AFTER_RECOMMEND = 5   # Start still grey this long after Recommend.
 COMMISSION_SKIP_TIMEOUT = 90          # Absolute cap for one commission.
-COMMISSION_SKIP_MAX_RECOMMEND = 3     # Recommend clicked this often, the flashing bug.
-# Names of commissions found unstartable in this Alas session. They are skipped
-# for the rest of the session, restarting Alas clears the list, so a player who
-# obtained the required ships can try again.
+COMMISSION_SKIP_MAX_RECOMMEND = 3     # Recommend clicks before the flashing bug.
+# Unstartable commissions are skipped for the rest of the session.
 COMMISSION_SKIP_LIST = set()
+
+# Dock pages scanned for a fill ship (AutoLevelShip / AutoPickShip).
+COMMISSION_DOCK_SCAN_PAGES = 6
+
+# Rarity ranking for the pick fallback; common (white) is dropped, blue+ only.
+_RARITY_ORDER = {'': 0, 'common': 1, 'rare': 2, 'elite': 3, 'super_rare': 4}
+# Pick fallback skips white (common); blue (rare) is the lowest it takes.
+_COMMISSION_PICK_MIN_RARITY = 'rare'
 
 
 def lines_detect(image):
@@ -67,7 +68,7 @@ def lines_detect(image):
     return np.array(peaks)
 
 
-class RewardCommission(UI, InfoHandler):
+class RewardCommission(Dock, UI, InfoHandler):
     daily: SelectedGrids
     urgent: SelectedGrids
     daily_choose: SelectedGrids
@@ -349,26 +350,194 @@ class RewardCommission(UI, InfoHandler):
         self.daily_choose, self.urgent_choose = self._commission_choose(self.daily, self.urgent)
         return daily, urgent
 
+    def _commission_dock_ship_count(self):
+        """Read the dock selected counter, (-1, -1) when unreadable."""
+        current, _, total = OCR_DOCK_SELECTED.ocr(self.device.image)
+        if total <= 0 or current < 0 or current > total:
+            return -1, -1
+        return current, total
+
+    def _commission_dock_fleet_question(self):
+        """True when the game asks to move the clicked ship out of its fleet."""
+        # The confirm button here is blue, the stock asset is orange, so
+        # handle_popup_confirm() never sees it and we must dismiss it ourselves.
+        return self.appear(POPUP_CANCEL, offset=self._popup_offset)
+
+    def _commission_dock_answer_fleet_question(self, confirm):
+        """Answer the fleet question; confirm pulls the ship out of its fleet."""
+        button = POPUP_CONFIRM if confirm else POPUP_CANCEL
+        # Clear the stale offset a stock button carries from its last match.
+        button.clear_offset()
+        self.device.click(button)
+        self.device.sleep(0.5)
+        self.device.screenshot()
+
+    def _commission_dock_click_ship(self, button, select=True, allow_fleet=False):
+        """Click a card and verify the selected counter moved; undo a wrong
+        toggle with one restore click. Returns False if it did not move."""
+        for _ in range(2):
+            self.device.screenshot()
+            before, _ = self._commission_dock_ship_count()
+            if before < 0:
+                # A counter that can not be read makes every click a guess.
+                return False
+            self.device.click(button)
+            self.device.sleep(0.4)
+            self.device.screenshot()
+            if self._commission_dock_fleet_question():
+                if not allow_fleet:
+                    # The card belongs to a fleet and this option never takes a
+                    # ship out of one, so the card is left alone.
+                    self._commission_dock_answer_fleet_question(confirm=False)
+                    return False
+                logger.warning('The ship belongs to a fleet, '
+                               'taking it out of that fleet to use it here')
+                self._commission_dock_answer_fleet_question(confirm=True)
+                after, _ = self._commission_dock_ship_count()
+                if after < 0:
+                    return False
+                return (after == before + 1) if select else (after == before - 1)
+            if self.handle_popup_confirm('COMMISSION_DOCK_SHIP'):
+                # A ship the game refuses answers with a popup instead of a
+                # selection, dismissing it leaves the counter where it was.
+                return False
+            after, _ = self._commission_dock_ship_count()
+            if after < 0:
+                return False
+            if (after == before + 1) if select else (after == before - 1):
+                return True
+            # The card was already in the wanted state or the click landed on
+            # nothing, one more click brings the counter back.
+            self.device.click(button)
+            self.device.sleep(0.4)
+        return False
+
+    def _commission_dock_scan(self, allow_fleet, sort_key=None):
+        """Scan the visible dock page for free ships, fleet ships last."""
+        scanner = ShipScanner(
+            level=(1, 125),
+            fleet=None if allow_fleet else 0,
+            status='free')
+        # Rarity is needed by the pick fallback, keep it on; emotion is unused.
+        scanner.disable('emotion')
+        ships = scanner.scan(self.device.image, output=False)
+        if sort_key is None:
+            sort_key = lambda s: -s.level
+        # Ships outside every fleet always come first.
+        ships.sort(key=lambda s: (s.fleet != 0, sort_key(s)))
+        return ships
+
+    def _commission_dock_fill_level_ship(self):
+        """Pick one level 100+ ship by hand; recommend fills the rest.
+        Returns False (still in dock) when no such ship was found."""
+        logger.hr('Commission dock fill')
+
+        def pick(allow_fleet):
+            self.handle_dock_cards_loading()
+            DOCK_SCROLL.set_top(main=self)
+            count, total = self._commission_dock_ship_count()
+            if count < 0:
+                logger.warning('Dock selected counter unreadable')
+                return False
+            if count >= total:
+                # Dock arrived full; drop the first card so we can pick our own
+                # level-100 ship (a preselected one is not detectable).
+                if not self._commission_dock_click_ship(CARD_GRIDS[(0, 0)], select=False):
+                    return False
+            for _ in range(COMMISSION_DOCK_SCAN_PAGES):
+                for ship in self._commission_dock_scan(allow_fleet):
+                    if ship.level < 100:
+                        continue
+                    if self._commission_dock_click_ship(ship.button, allow_fleet=allow_fleet):
+                        logger.attr('Level ship picked', f'Lv{ship.level}')
+                        return True
+                if DOCK_SCROLL.at_bottom(main=self):
+                    break
+                DOCK_SCROLL.next_page(main=self)
+            return False
+
+        if not pick(allow_fleet=False):
+            if self.config.Commission_NoFreeShipPolicy != 'use_fleet':
+                logger.warning(
+                    'No free ship of level 100+ outside the fleets, '
+                    'skip per NoFreeShipPolicy')
+                return False
+            logger.info('Retrying the scan with fleet ships allowed')
+            if not pick(allow_fleet=True):
+                return False
+        # Back at the details pane with one ship selected, the caller clicks
+        # Recommend next and the game fills the remaining slots itself.
+        self.dock_select_confirm(check_button=COMMISSION_ADVICE)
+        return True
+
+    def _commission_wait_dock(self, timeout=10):
+        """Wait for the dock to open after a grey start. Returns False if the
+        game refused the start and the commission is truly unstartable."""
+        timer = Timer(timeout)
+        timer.reset()
+        while not timer.reached():
+            self.device.screenshot()
+            if self.appear(DOCK_CHECK, offset=(20, 20)):
+                return True
+            if self.info_bar_count():
+                # Game refused the start, commission is truly unstartable.
+                return False
+        return self.appear(DOCK_CHECK, offset=(20, 20))
+
+    def _commission_dock_pick_ships(self):
+        """Fill the slots by hand with ships at or above the rarity the user
+        picks, locked ones included. False when the slots could not be filled."""
+        logger.hr('Commission dock pick')
+
+        def pick(allow_fleet):
+            self.handle_dock_cards_loading()
+            DOCK_SCROLL.set_top(main=self)
+            count, total = self._commission_dock_ship_count()
+            if count < 0 or total <= 0:
+                logger.warning('Dock selected counter unreadable')
+                return False
+            if count >= total:
+                return True
+            floor = _RARITY_ORDER.get(
+                self.config.Commission_PickMinRarity,
+                _RARITY_ORDER[_COMMISSION_PICK_MIN_RARITY])
+            high_first = self.config.Commission_PickLevelOrder == 'high_first'
+            sort_key = lambda s: (_RARITY_ORDER.get(s.rarity, 0),
+                                  -s.level if high_first else s.level)
+            for _ in range(COMMISSION_DOCK_SCAN_PAGES):
+                for ship in self._commission_dock_scan(allow_fleet, sort_key=sort_key):
+                    if count >= total:
+                        break
+                    # Skip ships below the rarity floor the user picked.
+                    if _RARITY_ORDER.get(ship.rarity, 0) < floor:
+                        continue
+                    # A ship the recommend already selected would toggle off,
+                    # _commission_dock_click_ship restores it and reports False.
+                    if self._commission_dock_click_ship(ship.button, allow_fleet=allow_fleet):
+                        count += 1
+                        logger.attr('Picked ship', f'Lv{ship.level} {ship.rarity}')
+                if count >= total:
+                    break
+                if DOCK_SCROLL.at_bottom(main=self):
+                    break
+                DOCK_SCROLL.next_page(main=self)
+            return count >= total
+
+        if not pick(allow_fleet=False):
+            if self.config.Commission_NoFreeShipPolicy != 'use_fleet':
+                logger.warning(
+                    'Not enough free ships to fill the commission, '
+                    'skip per NoFreeShipPolicy')
+                return False
+            logger.info('Retrying the pick with fleet ships allowed')
+            if not pick(allow_fleet=True):
+                return False
+        self.dock_select_confirm(check_button=COMMISSION_ADVICE)
+        return True
+
     def _commission_start_click(self, comm, is_urgent=False, skip_first_screenshot=True):
-        """
-        Start a commission.
-
-        Returns False and lets the caller skip this commission when it can not
-        be started at all, see COMMISSION_SKIP_* above. The caller then leaves
-        the details pane and goes on with the next commission in the list.
-
-        Args:
-            comm (Commission):
-            is_urgent (bool):
-            skip_first_screenshot:
-
-        Returns:
-            bool: If success
-
-        Pages:
-            in: page_commission
-            out: page_commission, info_bar, commission details unfold
-        """
+        """Start a commission, letting the caller skip it when it can not be
+        started at all (see COMMISSION_SKIP_*)."""
         logger.hr('Commission start')
         self.interval_clear(COMMISSION_ADVICE)
         self.interval_clear(COMMISSION_START)
@@ -378,6 +547,11 @@ class RewardCommission(UI, InfoHandler):
         # Set once Recommend has been clicked, then counts down to the moment the
         # Start button is expected to light up. None when Recommend was not used.
         recommend_timer = None
+        # The hand picked ship is worth one attempt per commission, a second
+        # trip to the dock means the game refuses it and skipping is next.
+        fill_tried = False
+        # Confirming a grey start to force the dock open is tried once too.
+        enter_dock_tried = False
         count = 0
         while 1:
             if skip_first_screenshot:
@@ -389,10 +563,8 @@ class RewardCommission(UI, InfoHandler):
             if self.info_bar_count():
                 break
 
-            # The commission can not be started, stop here so the caller can
-            # move on to the next one. This used to raise GameStuckError, which
-            # restarts the whole game and throws away every running commission,
-            # far more expensive than skipping a single one.
+            # Can not start: skip instead of raising GameStuckError, which would
+            # restart the game and drop every running commission.
             if skip_timer.reached():
                 logger.warning(f'Commission start timeout, skip: {comm.name}')
                 COMMISSION_SKIP_LIST.add(comm.name)
@@ -404,13 +576,21 @@ class RewardCommission(UI, InfoHandler):
                 COMMISSION_SKIP_LIST.add(comm.name)
                 return False
             if recommend_timer is not None and recommend_timer.reached():
-                # Recommend was clicked and the fleet was filled in, so Start is
-                # expected to be clickable by now. It stays grey when the
-                # recommended ships do not meet the requirements, which is what
-                # the level capped commissions do, and no amount of clicking
-                # Recommend will help. Give up on this one.
+                # Recommend filled the fleet but Start stays grey: the ships do
+                # not meet the requirement, so give up on this commission.
                 if self.match_template_color(COMMISSION_START, offset=(5, 20)):
                     recommend_timer = None
+                elif (self.config.Commission_AutoLevelShip
+                      or self.config.Commission_AutoPickShip) and not enter_dock_tried:
+                    # Start still grey after recommend: confirm it to enter the
+                    # dock and pick ships by hand instead of giving up.
+                    logger.info('Recommend left start grey, confirming to enter dock')
+                    enter_dock_tried = True
+                    self.device.click(COMMISSION_START)
+                    self._commission_wait_dock()
+                    recommend_timer = None
+                    comm_timer.reset()
+                    continue
                 else:
                     logger.warning(f'Ships do not meet the requirement, skip: {comm.name}')
                     COMMISSION_SKIP_LIST.add(comm.name)
@@ -427,19 +607,29 @@ class RewardCommission(UI, InfoHandler):
                 self.interval_reset(COMMISSION_ADVICE)
                 comm_timer.reset()
                 continue
-            # Accidentally entered dock
+            # Entered dock, either by confirming a grey start or by accident.
             if self.appear(DOCK_CHECK, offset=(20, 20), interval=3):
-                if recommend_timer is not None:
-                    # A fleet was recommended and confirming the start sent us to
-                    # the dock. That is what the game does when the ships do not
-                    # meet the requirements of the commission.
-                    logger.warning(f'Sent to dock after recommend, skip: {comm.name}')
-                    COMMISSION_SKIP_LIST.add(comm.name)
-                    return False
-                logger.info(f'equip_enter {DOCK_CHECK} -> {BACK_ARROW}')
+                picked = False
+                if self.config.Commission_AutoLevelShip and not fill_tried:
+                    fill_tried = True
+                    if self._commission_dock_fill_level_ship():
+                        picked = True
+                if not picked and self.config.Commission_AutoPickShip:
+                    if self._commission_dock_pick_ships():
+                        picked = True
+                if picked:
+                    # Back at the details pane, give Start one window to light
+                    # up before the grey check skips the commission.
+                    recommend_timer = Timer(COMMISSION_SKIP_AFTER_RECOMMEND)
+                    recommend_timer.reset()
+                    comm_timer.reset()
+                    continue
+                logger.warning(f'Sent to dock after recommend, skip: {comm.name}')
+                # Leave the dock so the caller finds the commission page as it expects.
                 self.device.click(BACK_ARROW)
-                comm_timer.reset()
-                continue
+                self.device.sleep(1)
+                COMMISSION_SKIP_LIST.add(comm.name)
+                return False
             # Check if is the right commission
             if self.appear(COMMISSION_ADVICE, offset=(5, 20), interval=7):
                 area = (0, 0, image_size(self.device.image)[0], COMMISSION_ADVICE.button[1])
@@ -518,9 +708,8 @@ class RewardCommission(UI, InfoHandler):
                 self.device.click_record_clear()
                 continue
             else:
-                # _commission_start_click returned False, either the commission
-                # picked is not the one asked for or it can not be started at
-                # all. Either way, leave it and go on with the next one.
+                # _commission_start_click gave up (wrong commission or
+                # unstartable), so leave it and go on to the next one.
                 logger.warning(f'Give up on commission: {comm}')
                 self.device.click_record_clear()
                 return False
@@ -649,7 +838,7 @@ class RewardCommission(UI, InfoHandler):
                         raise OilMaxed
                 # Check GET_SHIP at last to handle random white background at page_main
                 for button in [GET_SHIP]:
-                    if click_timer.reached() and self.appear(button, interval=1):
+                    if click_timer.reached() and self.appear(button, offset=(20, 20), interval=1):
                         self.ensure_no_info_bar(timeout=1)
                         drop.add(self.device.image)
 
