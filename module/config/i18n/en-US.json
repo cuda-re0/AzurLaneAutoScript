@@ -1443,10 +1443,6 @@
       "name": "Do Major Commissions",
       "help": "1200 oil commission is now outdated, the yield is very low, it is recommended to disable"
     },
-    "AutoLevelShip": {
-      "name": "Auto pick a level 100+ ship for high-level commissions",
-      "help": "When the game sends Alas to the dock because the recommended fleet misses the level requirement, pick one free ship of level 100+ by hand and let the recommend button fill the rest of the slots."
-    },
     "AutoPickShip": {
       "name": "Commission ship pick fallback (by rarity/level)",
       "help": "When ships are short, locked ships are picked automatically; one ship meeting the commission's level requirement is picked first, then the rest follow the preferences below; when no ship is available, it follows the \"no free level 100+ ship\" setting."
