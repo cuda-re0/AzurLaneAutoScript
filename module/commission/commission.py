@@ -17,7 +17,7 @@ from module.handler.assets import POPUP_CANCEL, POPUP_CONFIRM
 from module.handler.info_handler import InfoHandler
 from module.logger import logger
 from module.map.map_grids import SelectedGrids
-from module.retire.assets import DOCK_CHECK, SHIP_CONFIRM
+from module.retire.assets import DOCK_CHECK
 from module.retire.dock import CARD_GRIDS, DOCK_SCROLL, Dock, OCR_DOCK_SELECTED
 from module.retire.scanner import ShipScanner
 from module.ui.assets import BACK_ARROW, REWARD_GOTO_COMMISSION
@@ -592,8 +592,16 @@ class RewardCommission(Dock, UI, InfoHandler):
                     comm_timer.reset()
                     continue
                 else:
+                    # Last resort only: reached when no fill option is enabled,
+                    # or every enabled option was tried in the dock and Start is
+                    # still grey. Skipping is never the first move.
                     logger.warning(f'Ships do not meet the requirement, skip: {comm.name}')
                     COMMISSION_SKIP_LIST.add(comm.name)
+                    # Step back to the commission list only if we entered the
+                    # dock; otherwise we are already on it.
+                    if enter_dock_tried:
+                        self.device.click(BACK_ARROW)
+                        self.device.sleep(1)
                     return False
 
             # Click
