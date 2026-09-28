@@ -18,7 +18,7 @@ from module.handler.info_handler import InfoHandler
 from module.logger import logger
 from module.map.map_grids import SelectedGrids
 from module.retire.assets import DOCK_CHECK
-from module.retire.dock import CARD_GRIDS, DOCK_SCROLL, Dock, OCR_DOCK_SELECTED
+from module.retire.dock import DOCK_SCROLL, Dock, OCR_DOCK_SELECTED
 from module.retire.scanner import ShipScanner
 from module.ui.assets import BACK_ARROW, REWARD_GOTO_COMMISSION
 from module.ui.page import page_commission, page_reward
@@ -40,7 +40,7 @@ COMMISSION_SKIP_MAX_RECOMMEND = 3     # Recommend clicks before the flashing bug
 # Unstartable commissions are skipped for the rest of the session.
 COMMISSION_SKIP_LIST = set()
 
-# Dock pages scanned for a fill ship (AutoLevelShip / AutoPickShip).
+# Dock pages scanned for a fill ship (AutoPickShip).
 COMMISSION_DOCK_SCAN_PAGES = 6
 
 # Rarity ranking for the pick fallback; common (white) is dropped, blue+ only.
@@ -482,49 +482,6 @@ class RewardCommission(Dock, UI, InfoHandler):
         ships.sort(key=lambda s: (s.fleet != 0, sort_key(s)))
         return ships
 
-    def _commission_dock_fill_level_ship(self):
-        """Pick one level 100+ ship by hand; recommend fills the rest.
-        Returns False (still in dock) when no such ship was found."""
-        logger.hr('Commission dock fill')
-
-        def pick(allow_fleet):
-            self.handle_dock_cards_loading()
-            DOCK_SCROLL.set_top(main=self)
-            count, total = self._commission_dock_ship_count()
-            if count < 0:
-                logger.warning('Dock selected counter unreadable')
-                return False
-            if count >= total:
-                # Dock arrived full; drop the first card so we can pick our own
-                # level-100 ship (a preselected one is not detectable).
-                if not self._commission_dock_click_ship(CARD_GRIDS[(0, 0)], select=False):
-                    return False
-            for _ in range(COMMISSION_DOCK_SCAN_PAGES):
-                for ship in self._commission_dock_scan(allow_fleet):
-                    if ship.level < 100:
-                        continue
-                    if self._commission_dock_click_ship(ship.button, allow_fleet=allow_fleet):
-                        logger.attr('Level ship picked', f'Lv{ship.level}')
-                        return True
-                if DOCK_SCROLL.at_bottom(main=self):
-                    break
-                DOCK_SCROLL.next_page(main=self)
-            return False
-
-        if not pick(allow_fleet=False):
-            if self.config.Commission_NoFreeShipPolicy != 'use_fleet':
-                logger.warning(
-                    'No free ship of level 100+ outside the fleets, '
-                    'skip per NoFreeShipPolicy')
-                return False
-            logger.info('Retrying the scan with fleet ships allowed')
-            if not pick(allow_fleet=True):
-                return False
-        # Back at the details pane with one ship selected, the caller clicks
-        # Recommend next and the game fills the remaining slots itself.
-        self.dock_select_confirm(check_button=COMMISSION_ADVICE)
-        return True
-
     def _commission_wait_dock(self, timeout=10):
         """Wait for the dock to open after a grey start. Returns False if the
         game refused the start and the commission is truly unstartable."""
@@ -623,9 +580,6 @@ class RewardCommission(Dock, UI, InfoHandler):
         # Set once Recommend has been clicked, then counts down to the moment the
         # Start button is expected to light up. None when Recommend was not used.
         recommend_timer = None
-        # The hand picked ship is worth one attempt per commission, a second
-        # trip to the dock means the game refuses it and skipping is next.
-        fill_tried = False
         # Confirming a grey start to force the dock open is tried once too.
         enter_dock_tried = False
         count = 0
@@ -656,8 +610,7 @@ class RewardCommission(Dock, UI, InfoHandler):
                 # not meet the requirement, so give up on this commission.
                 if self.match_template_color(COMMISSION_START, offset=(5, 20)):
                     recommend_timer = None
-                elif (self.config.Commission_AutoLevelShip
-                      or self.config.Commission_AutoPickShip) and not enter_dock_tried:
+                elif self.config.Commission_AutoPickShip and not enter_dock_tried:
                     # Start still grey after recommend: confirm it to enter the
                     # dock and pick ships by hand instead of giving up.
                     logger.info('Recommend left start grey, confirming to enter dock')
@@ -693,14 +646,7 @@ class RewardCommission(Dock, UI, InfoHandler):
                 continue
             # Entered dock, either by confirming a grey start or by accident.
             if self.appear(DOCK_CHECK, offset=(20, 20), interval=3):
-                picked = False
-                if self.config.Commission_AutoLevelShip and not fill_tried:
-                    fill_tried = True
-                    if self._commission_dock_fill_level_ship():
-                        picked = True
-                if not picked and self.config.Commission_AutoPickShip:
-                    if self._commission_dock_pick_ships(comm=comm):
-                        picked = True
+                picked = self.config.Commission_AutoPickShip and self._commission_dock_pick_ships(comm=comm)
                 if picked:
                     # Back at the details pane, give Start one window to light
                     # up before the grey check skips the commission.
