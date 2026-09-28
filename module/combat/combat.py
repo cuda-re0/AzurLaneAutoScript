@@ -18,15 +18,6 @@ from module.template.assets import TEMPLATE_COMBAT_LOADING
 from module.ui.assets import BACK_ARROW, EXERCISE_CHECK, MUNITIONS_CHECK
 
 
-# A timeout/loss result screen puts a report button on the left, so tapping
-# BATTLE_STATUS_*.button lands next to the orange confirm instead of on it.
-BATTLE_STATUS_CONFIRM = Button(
-    area=(1090, 632, 1263, 690),
-    color=(223, 162, 74),
-    button=(1090, 632, 1263, 690),
-    file='./assets/cn/combat/BATTLE_STATUS_CONFIRM.png')
-
-
 class Combat(Level, HPBalancer, Retirement, SubmarineCall, CombatAuto, CombatManual, AutoSearchHandler):
     _automation_set_timer = Timer(1)
     battle_status_click_interval = 0
@@ -431,25 +422,6 @@ class Combat(Level, HPBalancer, Retirement, SubmarineCall, CombatAuto, CombatMan
         """
         if self.is_combat_executing():
             return False
-        # Timeout/loss screen: tap the orange confirm, log a red error, then
-        # stop this task so the scheduler moves on instead of looping the map.
-        if self.appear(BATTLE_STATUS_CONFIRM, offset=(5, 5),
-                       interval=self.battle_status_click_interval):
-            if drop:
-                drop.handle_add(self)
-            else:
-                self.device.sleep((0.25, 0.5))
-            self.device.click(BATTLE_STATUS_CONFIRM)
-            logger.error('Battle timed out or lost, skip current task')
-            try:
-                from module.notify import handle_notify
-                handle_notify(self.config.Error_OnePushConfig,
-                              title=f'Alas <{self.config_name}> battle failed',
-                              content=f'<{self.config_name}> Battle timed out or lost')
-            except Exception as e:
-                logger.warning(f'Failed to send battle-failed notification: {e}')
-            from module.config.config import TaskEnd
-            raise TaskEnd
         if self.appear(BATTLE_STATUS_S, interval=self.battle_status_click_interval):
             if drop:
                 drop.handle_add(self)
