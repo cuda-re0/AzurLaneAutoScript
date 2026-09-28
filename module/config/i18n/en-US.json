@@ -1449,7 +1449,7 @@
     },
     "AutoPickShip": {
       "name": "Commission ship pick fallback (by rarity/level)",
-      "help": "When ships are short, locked ships are picked automatically; when no ship is available, it follows the \"no free level 100+ ship\" setting."
+      "help": "When ships are short, locked ships are picked automatically; one ship meeting the commission's level requirement is picked first, then the rest follow the preferences below; when no ship is available, it follows the \"no free level 100+ ship\" setting."
     },
     "NoFreeShipPolicy": {
       "name": "When no free level 100+ ship exists",
