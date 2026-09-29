@@ -18,7 +18,7 @@ from module.handler.info_handler import InfoHandler
 from module.logger import logger
 from module.map.map_grids import SelectedGrids
 from module.retire.assets import DOCK_CHECK
-from module.retire.dock import DOCK_SCROLL, Dock, OCR_DOCK_SELECTED
+from module.retire.dock import CARD_GRIDS, DOCK_SCROLL, Dock, OCR_DOCK_SELECTED
 from module.retire.scanner import ShipScanner
 from module.ui.assets import BACK_ARROW, REWARD_GOTO_COMMISSION
 from module.ui.page import page_commission, page_reward
@@ -50,27 +50,29 @@ _COMMISSION_PICK_MIN_RARITY = 'rare'
 
 # Minimum ship level each commission demands (at least ONE ship at or above
 # it, per the game's own auto-fill rule). CN names as OCR'd; unknown -> 0.
+# Source: wiki.biligame.com/blhx/军事委托, column "需求舰娘等级".
 _COMMISSION_LEVEL_GROUP = {
-    '日常资源开发': {'I': 0, 'II': 0, 'III': 10, 'IV': 10, 'V': 30, 'VI': 30},
+    '日常资源开发': {'I': 1, 'II': 1, 'III': 10, 'IV': 10, 'V': 30, 'VI': 30},
     '高阶战术研发': {'I': 100, 'II': 100},
-    '小型油田开发': {'I': 0, 'II': 10, 'III': 30},
-    '中型油田开发': {'I': 0, 'II': 10, 'III': 30},
-    '大型油田开发': {'I': 0, 'II': 10, 'III': 30},
+    '小型油田开发': {'I': 1, 'II': 10, 'III': 30},
+    '中型油田开发': {'I': 1, 'II': 10, 'III': 30},
+    '大型油田开发': {'I': 1, 'II': 10, 'III': 30},
     '保卫运输部队': {'I': 5, 'II': 25, 'III': 50},
     '解救商船': {'I': 5, 'II': 25, 'III': 50},
     '敌袭': {'I': 12, 'II': 35, 'III': 60},
 }
 _COMMISSION_LEVEL_SINGLE = {
-    '初级矿脉护卫委托': 0, '中级矿脉护卫委托': 10, '高级矿脉护卫委托': 30,
-    '初级林木护卫委托': 0, '中级林木护卫委托': 10, '高级林木护卫委托': 30,
-    '小型商船护卫': 0, '中型商船护卫': 10, '大型商船护卫': 30,
-    '短距离航行训练': 0, '中距离航行训练': 10, '远距离航行训练': 30,
-    '舰队护卫演习': 0, '舰队运输演习': 10, '舰队实战演习': 30,
-    '近海防卫巡逻': 0, '海域浮标检查作业': 10, '前沿基地防卫巡逻': 30,
-    '舰队初阶演习': 0, '舰队中阶演习': 10, '舰队高阶演习': 30,
+    '初级矿脉护卫委托': 1, '中级矿脉护卫委托': 10, '高级矿脉护卫委托': 30,
+    '初级林木护卫委托': 1, '中级林木护卫委托': 10, '高级林木护卫委托': 30,
+    '小型商船护卫': 1, '中型商船护卫': 10, '大型商船护卫': 30,
+    '短距离航行训练': 1, '中距离航行训练': 10, '远距离航行训练': 30,
+    '舰队护卫演习': 1, '舰队运输演习': 10, '舰队实战演习': 30,
+    '近海防卫巡逻': 1, '海域浮标检查作业': 10, '前沿基地防卫巡逻': 30,
+    '舰队初阶演习': 1, '舰队中阶演习': 10, '舰队高阶演习': 30,
     '初阶自主训练': 10, '中阶自主训练': 30, '高阶自主训练': 70,
     '初阶对抗演习': 10, '中阶对抗演习': 30, '高阶对抗演习': 70,
     '初阶科研任务': 10, '中阶科研任务': 30, '高阶科研任务': 70,
+    '初阶工具整备': 10, '中阶工具整备': 30, '高阶工具整备': 70,
     '初阶战术课程': 10, '中阶战术课程': 30, '高阶战术课程': 70,
     '初阶货物运输': 10, '中阶货物运输': 30, '高阶货物运输': 70,
     '支援土豪尔岛': 5, '支援姆波罗岛': 12, '支援马拉基岛': 25,
@@ -91,7 +93,7 @@ _ROMAN_TRANS = str.maketrans({'Ⅰ': 'I', 'Ⅱ': 'II', 'Ⅲ': 'III',
 def commission_level_requirement(name):
     """Minimum ship level the commission demands (>=1 ship), 0 if unknown."""
     name = (name or '').upper().replace(' ', '')
-    name = re.sub(r'[「」\'\"（）()]', '', name)
+    name = re.sub(r'[「」『』“”\'\"（）()]', '', name)
     name = name.translate(_ROMAN_TRANS)
     for key, value in _COMMISSION_LEVEL_SINGLE.items():
         if name.startswith(key):
@@ -511,7 +513,14 @@ class RewardCommission(Dock, UI, InfoHandler):
                 logger.warning('Dock selected counter unreadable')
                 return False
             if count >= total:
-                return True
+                # Slots full but Start grey: the picked ships miss the level
+                # requirement. Free the first card to take one that meets it.
+                if required <= 1:
+                    return True
+                if not self._commission_dock_click_ship(CARD_GRIDS[(0, 0)], select=False):
+                    logger.warning('Could not free a slot, first card not selected')
+                    return False
+                count -= 1
             floor = _RARITY_ORDER.get(
                 self.config.Commission_PickMinRarity,
                 _RARITY_ORDER[_COMMISSION_PICK_MIN_RARITY])
@@ -520,40 +529,36 @@ class RewardCommission(Dock, UI, InfoHandler):
                                   -s.level if high_first else s.level)
             if required:
                 logger.info(f'Commission level requirement: Lv{required}+')
-            # One qualifying ship goes first, remaining slots follow the
-            # user's own preference; a second pass drops the requirement so
-            # a wrong guess never blocks the plain fill.
+            # One qualifying ship goes first, the remaining slots follow the
+            # user's own preference.
             required_done = not required
-            for attempt in range(2):
-                for _ in range(COMMISSION_DOCK_SCAN_PAGES):
-                    for ship in self._commission_dock_scan(allow_fleet, sort_key=sort_key):
-                        if count >= total:
-                            break
-                        # Skip ships below the rarity floor the user picked.
-                        if _RARITY_ORDER.get(ship.rarity, 0) < floor:
-                            continue
-                        if not required_done:
-                            if ship.level < required:
-                                continue
-                            # A ship the recommend already selected would
-                            # toggle off, the click helper restores it.
-                            if self._commission_dock_click_ship(ship.button, allow_fleet=allow_fleet):
-                                count += 1
-                                required_done = True
-                                logger.attr('Level ship picked', f'Lv{ship.level}')
-                            continue
-                        if self._commission_dock_click_ship(ship.button, allow_fleet=allow_fleet):
-                            count += 1
-                            logger.attr('Picked ship', f'Lv{ship.level} {ship.rarity}')
+            for _ in range(COMMISSION_DOCK_SCAN_PAGES):
+                for ship in self._commission_dock_scan(allow_fleet, sort_key=sort_key):
                     if count >= total:
                         break
-                    if DOCK_SCROLL.at_bottom(main=self):
-                        break
-                    DOCK_SCROLL.next_page(main=self)
-                if required_done:
+                    # Skip ships below the rarity floor the user picked.
+                    if _RARITY_ORDER.get(ship.rarity, 0) < floor:
+                        continue
+                    if not required_done:
+                        if ship.level < required:
+                            continue
+                        # A ship the recommend already selected would
+                        # toggle off, the click helper restores it.
+                        if self._commission_dock_click_ship(ship.button, allow_fleet=allow_fleet):
+                            count += 1
+                            required_done = True
+                            logger.attr('Level ship picked', f'Lv{ship.level}')
+                        continue
+                    if self._commission_dock_click_ship(ship.button, allow_fleet=allow_fleet):
+                        count += 1
+                        logger.attr('Picked ship', f'Lv{ship.level} {ship.rarity}')
+                if count >= total:
                     break
-                logger.info('No ship meets the level requirement, fill plainly')
-                required_done = True
+                if DOCK_SCROLL.at_bottom(main=self):
+                    break
+                DOCK_SCROLL.next_page(main=self)
+            if not required_done:
+                logger.warning(f'No ship meets Lv{required}+, cannot start')
             return count >= total
 
         if not pick(allow_fleet=False):
